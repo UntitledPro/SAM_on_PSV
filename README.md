@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # context-based-parking-slot-detect
 
 Tensorflow implementation of [Context-based parking slot detection](https://ieeexplore.ieee.org/abstract/document/9199853) (IEEE Access)
@@ -67,3 +68,6 @@ If you use this code for your research, please cite the following work:
   pages={171551-171559},
   doi={10.1109/ACCESS.2020.3024668}}
 '''
+=======
+# SAM_on_PSV
+>>>>>>> sam/main
