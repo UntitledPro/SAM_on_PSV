@@ -1,7 +1,6 @@
 import os
 import shutil
 import cv2
-import monai
 import random
 import numpy as np
 from PIL import Image
@@ -10,42 +9,16 @@ from statistics import mean
 from typing import Dict, List, Tuple
 
 import torch
+import torch.backends
+import torch.backends.cudnn
 from torch.optim import Adam
-import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 
 from transformers import SamProcessor
 from transformers import SamModel
-import segmentation_models_pytorch as smp
-from transformers.models.maskformer.modeling_maskformer \
-    import dice_loss, sigmoid_focal_loss
-
-
-def set_random_seed(seed=1):
-    """Set random seed and cuda backen for reproducibility."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
-def get_disturbed_bounding_box(ground_truth_map: np.ndarray) -> List:
-    # get bounding box from mask
-    y_indices, x_indices = np.where(ground_truth_map > 0)
-    x_min, x_max = np.min(x_indices), np.max(x_indices)
-    y_min, y_max = np.min(y_indices), np.max(y_indices)
-    # add perturbation to bounding box coordinates
-    H, W = ground_truth_map.shape
-    x_min = max(0, x_min - np.random.randint(0, 20))
-    x_max = min(W, x_max + np.random.randint(0, 20))
-    y_min = max(0, y_min - np.random.randint(0, 20))
-    y_max = min(H, y_max + np.random.randint(0, 20))
-    bbox = [x_min, y_min, x_max, y_max]
-    return bbox
+from losses import get_critn
+from utils import postprocess_masks, set_random_seed, mask_iou, DSC
 
 
 def erode_mask(mask: np.ndarray, kernel_size: int = 3) -> np.ndarray:
@@ -62,7 +35,7 @@ def dilate_mask(mask: np.ndarray,
     return mask
 
 
-def get_point_prompt_bymask(mask: np.ndarray) -> np.ndarray:
+def get_point_prompt_bymask(mask: np.ndarray) -> Dict[str, List]:
     """
     input_points: [nb_images, nb_predictions, nb_points_per_mask, 2]
     """
@@ -106,141 +79,6 @@ def get_point_prompt_bymask(mask: np.ndarray) -> np.ndarray:
     # pmt_labels = np.hstack([fg_label, bg_label])
     return {'input_points': pmt_points,
             'input_labels': pmt_labels}
-
-
-def postprocess_masks(masks: torch.Tensor,
-                      input_size: Tuple[int, ...],
-                      original_size: Tuple[int, ...], image_size=1024) -> torch.Tensor:
-    """
-    Remove padding and upscale masks to the original image size.
-
-    Args:
-      masks (torch.Tensor):
-        Batched masks from the mask_decoder, in BxCxHxW format.
-      input_size (tuple(int, int)):
-        The size of the image input to the model, in (H', W') format. Used to remove padding.
-      original_size (tuple(int, int)):
-        The original size of the image before resizing for input to the model, in (H, W) format.
-
-    Returns:
-      (torch.Tensor): Batched masks in BxCxHxW format, where (H, W)
-        is given by original_size.
-    """
-    masks = F.interpolate(
-        masks,
-        (image_size, image_size),
-        mode="bilinear",
-        align_corners=False,
-    )
-    masks = masks[..., : input_size[0], : input_size[1]]
-    masks = F.interpolate(masks, original_size,
-                          mode="bilinear", align_corners=False)
-    return masks
-
-
-def mask_iou(mask1: np.ndarray,
-             mask2: np.ndarray) -> List[float]:
-    """Calculate IoU for two masks
-    mask1, mask2: [B, H, W]
-    Return: iou: [B]
-    """
-    bt_size = mask1.shape[0]
-    assert bt_size == mask2.shape[0]
-    assert mask1.shape == mask2.shape
-    iou = []
-    for i in range(bt_size):
-        mask1_i = mask1[i].reshape(-1).astype(int)
-        mask2_i = mask2[i].reshape(-1).astype(int)
-        intersection = np.sum(mask1_i * mask2_i)
-        union = np.sum(mask1_i) + np.sum(mask2_i) - intersection + 1e-5
-        iou.append(intersection / union)
-    return iou
-
-
-def DSC(mask1, mask2):
-    """Dice similarity coefficient
-    mask1, mask2: [B, H, W]
-    Return: dsc: [B]
-    """
-    bt_size = mask1.shape[0]
-    assert bt_size == mask2.shape[0]
-    assert mask1.shape == mask2.shape
-    dsc = []
-    for i in range(bt_size):
-        mask1_i = mask1[i].reshape(-1).astype(int)
-        mask2_i = mask2[i].reshape(-1).astype(int)
-        intersection = np.sum(mask1_i * mask2_i)
-        union = np.sum(mask1_i) + np.sum(mask2_i) + 1e-5
-        dsc.append(2 * intersection / union)
-    return dsc
-
-
-def critn_mse(outputs, gt_mask, batch):
-    gt_mask = gt_mask.float()
-    low_res_masks = outputs.pred_masks
-    upscaled_masks = postprocess_masks(
-        low_res_masks.squeeze(1),
-        batch["reshaped_input_sizes"][0].tolist(),
-        batch["original_sizes"][0].tolist()).to(gt_mask.device)
-    predicted_masks = F.normalize(F.threshold(upscaled_masks, 0.0, 0))
-    loss = torch.nn.MSELoss(reduction='mean')(
-        predicted_masks, gt_mask.unsqueeze(1)) * 10
-    return loss
-
-
-def critn_med(outputs, gt_mask, batch):
-    gt_mask = gt_mask.float()
-    low_res_masks = outputs.pred_masks
-    upscaled_masks = postprocess_masks(
-        low_res_masks.squeeze(1),
-        batch["reshaped_input_sizes"][0].tolist(),
-        batch["original_sizes"][0].tolist()).to(gt_mask.device)
-    seg_loss = monai.losses.DiceCELoss(sigmoid=True,
-                                       squared_pred=True,
-                                       reduction='mean')
-    loss = seg_loss(upscaled_masks,
-                    gt_mask.unsqueeze(1))
-    return loss
-
-
-def critn_sam(outputs, gt_mask: torch.Tensor, batch):
-    low_res_masks = outputs.pred_masks
-    upscaled_masks = postprocess_masks(
-        low_res_masks.squeeze(1),
-        batch["reshaped_input_sizes"][0].tolist(),
-        batch["original_sizes"][0].tolist()).to(gt_mask.device)
-    'process upscaled masks'
-    '''Compute iou by thresholding
-    predicted_masks = threshold(upscaled_masks, 0.0, 0)
-    predicted_masks = normalize(
-                threshold(upscaled_masks, 0.0, 0))
-    '''
-    predicted_masks = torch.sigmoid(upscaled_masks)
-    batch_tp, batch_fp, batch_fn, batch_tn = smp.metrics.get_stats(
-        predicted_masks,
-        gt_mask.unsqueeze(1),
-        mode='binary',
-        threshold=0.5,
-    )
-    batch_iou = smp.metrics.iou_score(batch_tp, batch_fp, batch_fn, batch_tn)
-    loss_iou = F.mse_loss(outputs.iou_scores.squeeze(1),
-                          batch_iou, reduction='mean')
-    # compute focal and dice loss
-    mask_logits = upscaled_masks.flatten(1)
-    gt_mask_logits = gt_mask.flatten(1).float()
-    nb_masks = mask_logits.shape[0]
-    loss_focal = sigmoid_focal_loss(mask_logits, gt_mask_logits, nb_masks)
-    loss_dice = dice_loss(mask_logits, gt_mask_logits, nb_masks)
-    return loss_iou + loss_focal * 20. + loss_dice
-
-
-def get_critn(critn_name):
-    critn_dict = {
-        'mse': critn_mse,
-        'med': critn_med,
-        'sam': critn_sam,
-    }
-    return critn_dict[critn_name]
 
 
 def calc_metrics(pred_masks: torch.Tensor,
@@ -329,18 +167,27 @@ class PSVDataset(Dataset):
     def __getitem__(self, index: int) -> Dict[str, np.ndarray]:
         sample_id = self.samples[index]
         image = cv2.imread(os.path.join(self.image_root, f'{sample_id}.jpg'))
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        mask = self.get_mask(sample_id)
-        # resize
-        image = cv2.resize(image, (600, 600), interpolation=cv2.INTER_LINEAR)
-        mask = cv2.resize(mask, (600, 600), interpolation=cv2.INTER_LINEAR)
-        return {'image': image, 'label': mask}
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        lab_image = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
 
-    def get_mask(self, sample_id):
-        mask_path = os.path.join(self.label_root, f'{sample_id}.png')
+        mask = self.get_mask(sample_id)
+        mask = cv2.cv.fromarray(mask)
+
+        # resize
+        rgb_image = cv2.resize(rgb_image, (600, 600),
+                               interpolation=cv2.INTER_LINEAR)
+        lab_image = cv2.resize(lab_image, (600, 600),
+                               interpolation=cv2.INTER_LINEAR)
+        mask = cv2.resize(mask, (600, 600), interpolation=cv2.INTER_LINEAR)
+        return {'image': image, 'label': mask, 'lab_image': lab_image}
+
+    def get_mask(self, sample_id) -> np.ndarray:
+        mask_path: str = os.path.join(self.label_root, f'{sample_id}.png')
         mask = np.array(Image.open(mask_path)).astype(np.uint8)
         # eliminate class impact
-        mask = np.bool_(mask).astype(np.uint8)
+        mask = np.array(np.bool_(mask), dtype=np.uint8)
+        assert len(np.unique(mask)) <= 2, \
+            f'Invalid mask value: {np.unique(mask)}'
         return mask
 
 
@@ -353,6 +200,7 @@ class SAMDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx):
+
         item = self.dataset[idx]
         image = item["image"]
         ground_truth_mask = np.array(item["label"])
@@ -366,13 +214,15 @@ class SAMDataset(Dataset):
         # remove batch dimension which the processor adds by default
         inputs = {k: v.squeeze(0) for k, v in inputs.items()}
 
+        # add lab tensor image
+        inputs['lab_image'] = torch.as_tensor(image).permute(2, 0, 1)
         # add ground truth segmentation
         inputs["ground_truth_mask"] = ground_truth_mask
 
         return inputs
 
 
-def finetune(args):
+def finetune(args) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckp_path = os.path.join(args.ckp_dir, args.ckp_name)
     resume_path = os.path.join(ckp_path, 'latest.pth')
@@ -382,10 +232,12 @@ def finetune(args):
 
     'init model and processor'
     model = SamModel.from_pretrained(
-        "facebook/sam-vit-huge", mirror='tuna').to(device)
+        "facebook/sam-vit-huge", mirror='tuna')
+    model.to(device)
     processor = SamProcessor.from_pretrained(
         "facebook/sam-vit-huge", mirror='tuna')
-    criterion = get_critn(args.critn)
+    criterion = {'critn': get_critn(args.critn),
+                 'pair': get_critn('pair')}
 
     'init dataset and dataloader'
     train_dataset = SAMDataset(dataset=PSVDataset(split='train',
@@ -408,7 +260,6 @@ def finetune(args):
         model, optimizer, epoch_start = \
             resume(model, optimizer, resume_path, device)
     model.to(device)
-
     for epoch in range(epoch_start, num_epochs):
         if epoch % args.interval == 0:
             avg_iou, avg_dsc = test(model, test_dataloader,
@@ -433,7 +284,13 @@ def finetune(args):
                             input_labels=batch["input_labels"].to(device),
                             multimask_output=False)
             gt_mask = batch["ground_truth_mask"].to(device)
-            loss = criterion(outputs, gt_mask, batch)
+            loss = criterion['critn'](outputs, gt_mask, batch)
+            if args.pair:
+                loss_pair = criterion['pair'](outputs, gt_mask, batch,
+                                              args.pairwise_size,
+                                              args.pairwise_dilation)
+                loss += loss_pair
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -469,7 +326,12 @@ def test(model, test_dataloader,
                         input_labels=batch["input_labels"].to(device),
                         multimask_output=False)
         gt_mask = batch["ground_truth_mask"].to(device)
-        loss = criterion(outputs, gt_mask, batch)
+        loss = criterion['critn'](outputs, gt_mask, batch)
+        if args.pair:
+            loss_pair = criterion['pair'](outputs, gt_mask, batch,
+                                          args.pairwise_size,
+                                          args.pairwise_dilation)
+            loss += loss_pair
 
         iou_e, dsc_e = calc_metrics(outputs.pred_masks.cpu().detach(),
                                     gt_mask.cpu().detach(),
@@ -496,8 +358,13 @@ if __name__ == '__main__':
                         type=str,
                         default='work_dirs/sam_psv/')
     parser.add_argument('--ckp_name', type=str, default='sam_loss')
-    parser.add_argument('--resume', action='store_false')
+    parser.add_argument('--resume', action='store_true')
     parser.add_argument('--critn', type=str, default='sam')
+
+    parser.add_argument('--pair', action='store_true')
+    parser.add_argument('--pairwise_size', type=int, default=3)
+    parser.add_argument('--pairwise_dilation', type=int, default=1)
+
     args = parser.parse_args()
     for k, v in vars(args).items():
         print(f'{k:15s}: {str(v)}')
