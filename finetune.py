@@ -192,9 +192,10 @@ class PSVDataset(Dataset):
 
 
 class SAMDataset(Dataset):
-    def __init__(self, dataset, processor):
+    def __init__(self, dataset, processor, noise_rate: int = 0):
         self.dataset = dataset
         self.processor = processor
+        self.noise_rate = noise_rate
 
     def __len__(self):
         return len(self.dataset)
@@ -204,6 +205,9 @@ class SAMDataset(Dataset):
         item = self.dataset[idx]
         image = item["image"]
         ground_truth_mask = np.array(item["label"])
+        if self.noise_rate > 0:
+            ground_truth_mask = dilate_mask(ground_truth_mask, 2,
+                                            self.noise_rate)
 
         # get prompt by erosion
         prompt = get_point_prompt_bymask(ground_truth_mask)
@@ -242,7 +246,8 @@ def finetune(args) -> None:
     'init dataset and dataloader'
     train_dataset = SAMDataset(dataset=PSVDataset(split='train',
                                                   ds_size=args.ds_size),
-                               processor=processor)
+                               processor=processor,
+                               noise_rate=args.noise_rate)
     train_dataloader = DataLoader(train_dataset, batch_size=5, shuffle=True)
     test_dataset = SAMDataset(dataset=PSVDataset(split='test',
                                                  ds_size=1.0),
@@ -364,6 +369,9 @@ if __name__ == '__main__':
     parser.add_argument('--pair', action='store_true')
     parser.add_argument('--pairwise_size', type=int, default=3)
     parser.add_argument('--pairwise_dilation', type=int, default=1)
+
+    parser.add_argument('--noise_rate', type=int, default=0,
+                        help='1: 10%, 6: 40%')
 
     args = parser.parse_args()
     for k, v in vars(args).items():
