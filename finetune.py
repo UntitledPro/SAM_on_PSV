@@ -171,15 +171,13 @@ class PSVDataset(Dataset):
         lab_image = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
 
         mask = self.get_mask(sample_id)
-        mask = cv2.cv.fromarray(mask)
-
         # resize
         rgb_image = cv2.resize(rgb_image, (600, 600),
                                interpolation=cv2.INTER_LINEAR)
         lab_image = cv2.resize(lab_image, (600, 600),
                                interpolation=cv2.INTER_LINEAR)
         mask = cv2.resize(mask, (600, 600), interpolation=cv2.INTER_LINEAR)
-        return {'image': image, 'label': mask, 'lab_image': lab_image}
+        return {'image': rgb_image, 'label': mask, 'lab_image': lab_image}
 
     def get_mask(self, sample_id) -> np.ndarray:
         mask_path: str = os.path.join(self.label_root, f'{sample_id}.png')
@@ -219,7 +217,7 @@ class SAMDataset(Dataset):
         inputs = {k: v.squeeze(0) for k, v in inputs.items()}
 
         # add lab tensor image
-        inputs['lab_image'] = torch.as_tensor(image).permute(2, 0, 1)
+        inputs['lab_image'] = torch.as_tensor(item['lab_image']).permute(2, 0, 1)
         # add ground truth segmentation
         inputs["ground_truth_mask"] = ground_truth_mask
 
@@ -251,7 +249,8 @@ def finetune(args) -> None:
     train_dataloader = DataLoader(train_dataset, batch_size=5, shuffle=True)
     test_dataset = SAMDataset(dataset=PSVDataset(split='test',
                                                  ds_size=1.0),
-                              processor=processor)
+                              processor=processor,
+                              noise_rate=0)
     test_dataloader = DataLoader(test_dataset, batch_size=5, shuffle=False)
 
     'freeze image encoder and prompt encoder'
@@ -265,18 +264,17 @@ def finetune(args) -> None:
         model, optimizer, epoch_start = \
             resume(model, optimizer, resume_path, device)
     model.to(device)
+
+    iter = torch.tensor(0.)
+    warmup_iter = torch.tensor(1000.)
     for epoch in range(epoch_start, num_epochs):
-        if epoch % args.interval == 0:
+        if epoch % args.interval == 0 and epoch > 0:
             avg_iou, avg_dsc = test(model, test_dataloader,
                                     criterion, device)
             save_path = os.path.join(
                 ckp_path,
                 f'epoch{epoch}_iou{avg_iou * 100:.2f}_dsc{avg_dsc * 100:.2f}.pth')
-            latest_path = os.path.join(
-                ckp_path,
-                'latest.pth')
             save_model(model, optimizer, epoch, save_path)
-            save_model(model, optimizer, epoch, latest_path)
 
         epoch_losses = []
         iou = []
@@ -294,7 +292,7 @@ def finetune(args) -> None:
                 loss_pair = criterion['pair'](outputs, gt_mask, batch,
                                               args.pairwise_size,
                                               args.pairwise_dilation)
-                loss += loss_pair
+                loss += loss_pair * (iter / warmup_iter).clamp(0, 0.1)
 
             optimizer.zero_grad()
             loss.backward()
@@ -306,16 +304,17 @@ def finetune(args) -> None:
             epoch_losses.append(loss.item())
             iou.extend(iou_e)
             dsc.extend(dsc_e)
+            iter += 1
 
         print('TRAINING' + '=' * 50)
         print(f'EPOCH: {epoch}')
         print(f'Mean loss: {mean(epoch_losses)}')
         print(f'Mean iou: {mean(iou)}')
         print(f'Mean dsc: {mean(dsc)}')
-        if epoch + 1 == num_epochs:
-            save_path = os.path.join(
-                ckp_path, 'latest.pth')
-            save_model(model, optimizer, epoch, save_path)
+        latest_path = os.path.join(
+            ckp_path,
+            'latest.pth')
+        save_model(model, optimizer, epoch, latest_path)
 
 
 @torch.no_grad()
@@ -375,6 +374,6 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     for k, v in vars(args).items():
-        print(f'{k:15s}: {str(v)}')
+        print(f'{k:20s}: {str(v)}')
     set_random_seed(args.seed)
     finetune(args)

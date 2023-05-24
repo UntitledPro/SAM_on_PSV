@@ -140,7 +140,7 @@ def pairwise_loss(mask_logits: Tensor,
     Args:
         mask_logit: [bt_size, nb_class, h, w]
         gt_mask: [bt_size, nb_class, h, w]
-        images: cv2.Mat, LAB format
+        images: Tensor, LAB format
         pairwise_size: the size of the converlutional kernel
         pairwise_dilation: the size of the dilation rate
 
@@ -148,7 +148,7 @@ def pairwise_loss(mask_logits: Tensor,
         loss_pairwise: Tensor
     '''
     gt_mask = gt_mask.detach().clone()
-    images_color_similarity = get_images_color_similarity(images)
+    images_color_similarity = get_images_color_similarity(images.float())
     pairwise_prob: Tensor = compute_pairwise_term(
         mask_logits,
         pairwise_size,
@@ -184,7 +184,8 @@ def critn_pair(outputs, gt_mask, batch,
     '''
     gt_mask = F.normalize(F.threshold(upscaled_masks, 0.0, 0)).float()
     mask_logits = upscaled_masks
-    loss = pairwise_loss(mask_logits, gt_mask, batch['lab_image'],
+    lab_image = batch['lab_image'].float().to(gt_mask.device)
+    loss = pairwise_loss(mask_logits, gt_mask, lab_image,
                          pairwise_size, pairwise_dilation)
     return loss
 
