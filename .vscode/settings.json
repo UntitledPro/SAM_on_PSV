@@ -1,0 +1,11 @@
+{
+    "python.linting.flake8Args": [
+        "--ignore=E501,E402,E731,W503,N806",
+        "--max-line-length=79",
+        "--exclude=venv,build,dist"
+    ],
+    "flake8.args": [
+        "--ignore=E501,E402,E731,N806, E203, W503, E501",
+        "--verbose",
+    ],
+}

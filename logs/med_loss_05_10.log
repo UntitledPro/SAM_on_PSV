@@ -1,0 +1,38 @@
+seed                : 1
+num_epochs          : 1000
+interval            : 100
+ds_size             : 0.05
+ckp_dir             : work_dirs/sam_psv/
+ckp_name            : med_loss_05_10
+resume              : True
+critn               : med
+pair                : False
+pairwise_size       : 3
+pairwise_dilation   : 1
+noise_rate          : 1
+Cannot find work_dirs/sam_psv/med_loss_05_10/latest.pth
+  0%|          | 0/26 [00:00<?, ?it/s]  0%|          | 0/26 [00:03<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/jiashuo/workspace/codes/SAM_on_PSD/finetune.py", line 379, in <module>
+    finetune(args)
+  File "/home/jiashuo/workspace/codes/SAM_on_PSD/finetune.py", line 285, in finetune
+    outputs = model(pixel_values=batch["pixel_values"].to(device),
+  File "/home/jiashuo/environment/anaconda3/envs/QAQ/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1110, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/home/jiashuo/environment/anaconda3/envs/QAQ/lib/python3.10/site-packages/transformers/models/sam/modeling_sam.py", line 1341, in forward
+    vision_outputs = self.vision_encoder(
+  File "/home/jiashuo/environment/anaconda3/envs/QAQ/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1110, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/home/jiashuo/environment/anaconda3/envs/QAQ/lib/python3.10/site-packages/transformers/models/sam/modeling_sam.py", line 1037, in forward
+    layer_outputs = layer_module(hidden_states, output_attentions=output_attentions)
+  File "/home/jiashuo/environment/anaconda3/envs/QAQ/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1110, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/home/jiashuo/environment/anaconda3/envs/QAQ/lib/python3.10/site-packages/transformers/models/sam/modeling_sam.py", line 923, in forward
+    hidden_states, attn_weights = self.attn(
+  File "/home/jiashuo/environment/anaconda3/envs/QAQ/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1110, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/home/jiashuo/environment/anaconda3/envs/QAQ/lib/python3.10/site-packages/transformers/models/sam/modeling_sam.py", line 826, in forward
+    attn_weights = self.add_decomposed_rel_pos(
+  File "/home/jiashuo/environment/anaconda3/envs/QAQ/lib/python3.10/site-packages/transformers/models/sam/modeling_sam.py", line 808, in add_decomposed_rel_pos
+    attn = attn + rel_h[:, :, :, :, None] + rel_w[:, :, :, None, :]
+RuntimeError: CUDA out of memory. Tried to allocate 5.00 GiB (GPU 0; 47.54 GiB total capacity; 13.47 GiB already allocated; 3.99 GiB free; 13.71 GiB reserved in total by PyTorch) If reserved memory is >> allocated memory try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF
